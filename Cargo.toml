@@ -3,8 +3,8 @@ name = "ipfix"
 version = "0.1.1"
 authors = ["Nick Price <nick@spun.io>"]
 description = "IPFIX (RFC7011) parser library with JSON export, based on nom"
-homepage = "https://gitlab.com/dominotree/rs-ipfix"
-repository = "https://gitlab.com/dominotree/rs-ipfix"
+homepage = "https://github.com/dominotree/rs-ipfix"
+repository = "https://github.com/dominotree/rs-ipfix"
 license = "MIT"
 
 [dependencies.nom]
