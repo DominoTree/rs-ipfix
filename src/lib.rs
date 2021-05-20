@@ -43,7 +43,6 @@ struct SetHeader {
     set_id: u16, // 2: Template Set, 3: Options Template Set, >255: Data Set
     length: u16,
 }
-
 pub struct TemplateSet {
     #[allow(dead_code)]
     header: SetHeader,
@@ -121,11 +120,11 @@ impl IpfixConsumer {
         // this should be 1:1 with UDP datagrams
         // we aren't currently using any of the data from the ipfix message header but we still
         // need to chop it off
-        if let nom::IResult::Done(bytes, _) = parse_ipfix_header(data) {
+        if let Ok((bytes, _)) = parse_ipfix_header(data) {
             let mut remaining_bytes = bytes;
             let mut datasets = Vec::<DataSet>::new();
             loop {
-                if let nom::IResult::Done(bytes, set_header) = parse_set_header(remaining_bytes) {
+                if let Ok((bytes, set_header)) = parse_set_header(remaining_bytes) {
                     let set_length = (set_header.length - 4) as usize;
                     let set_bytes = &bytes.clone()[0..set_length];
                     if bytes.len() - set_length > 0 {
@@ -159,7 +158,7 @@ impl IpfixConsumer {
                             }
                         }
                     };
-                    if let Some(nom::IResult::Done(_, object)) = set {
+                    if let Some(Ok((_, object))) = set {
                         match object {
                             Set::TemplateSet(set) => {
                                 for template in set.records {
@@ -236,19 +235,19 @@ fn parse_ipfix_header(data: &[u8]) -> nom::IResult<&[u8], IpfixHeader> {
     named!(sequence_number <&[u8], u32>, map!(take!(4), be_buf_to_u32));
     named!(observation_domain_id <&[u8], u32>, map!(take!(4), be_buf_to_u32));
 
-    named!(ipfix_header <&[u8], IpfixHeader>, chain!(
-        version: ipfix_version ~
-        length: message_length ~
-        time: export_time ~
-        sequence: sequence_number ~
-        domain_id: observation_domain_id,
-        || { IpfixHeader {
+    named!(ipfix_header <&[u8], IpfixHeader>, do_parse!(
+        version: ipfix_version >>
+        length: message_length >>
+        time: export_time >>
+        sequence: sequence_number >>
+        domain_id: observation_domain_id >>
+        (IpfixHeader {
             version: version,
             length: length,
             export_time: time,
             sequence_number: sequence,
             observation_domain_id: domain_id
-        }}
+        })
     ));
 
     ipfix_header(&data)
@@ -274,30 +273,31 @@ fn parse_field_specifier(data: &[u8]) -> nom::IResult<&[u8], FieldSpecifier> {
         enterprise_number
     ));
 
-    if let nom::IResult::Done(bytes, id) = element_ident_with_enterprise_bit(data) {
+    if let Ok((bytes, id)) = element_ident_with_enterprise_bit(data) {
         // pull off the first bit
         if id > 32767 {
-            if let nom::IResult::Done(remaining_data, (field_length, enterprise_number)) =
+            if let Ok((remaining_data, (field_length, enterprise_number))) =
                 enterprise_field_specifier(bytes) {
-                return nom::IResult::Done(remaining_data,
-                                          FieldSpecifier {
-                                              enterprise_number: Some(enterprise_number),
-                                              ident: id - 32768,
-                                              field_length: field_length,
-                                          });
+                return Ok((remaining_data,
+                        FieldSpecifier {
+                            enterprise_number: Some(enterprise_number),
+                            ident: id - 32768,
+                            field_length: field_length,
+                        }));
             }
         } else {
-            if let nom::IResult::Done(remaining_data, field_length) = field_length(bytes) {
-                return nom::IResult::Done(remaining_data,
+            if let Ok((remaining_data, field_length)) = field_length(bytes) {
+                return Ok((remaining_data,
                                           FieldSpecifier {
                                               enterprise_number: None,
                                               ident: id,
                                               field_length: field_length,
-                                          });
+                                          }));
             }
         }
     }
-    nom::IResult::Incomplete(nom::Needed::Unknown)
+    
+    Err(nom::Err::Incomplete(nom::Needed::Unknown))
 }
 
 
@@ -312,13 +312,13 @@ fn parse_set_header(data: &[u8]) -> nom::IResult<&[u8], SetHeader> {
     named!(set_id <&[u8], u16>, map!(take!(2), be_buf_to_u16));
     named!(set_length <&[u8], u16>, map!(take!(2), be_buf_to_u16));
 
-    named!(set_header <&[u8], SetHeader>, chain!(
-        id: set_id ~
-        length: set_length,
-        || { SetHeader {
+    named!(set_header <&[u8], SetHeader>, do_parse!(
+        id: set_id >>
+        length: set_length >>
+        ( SetHeader {
             set_id: id,
             length: length
-        }}
+        })
     ));
 
     set_header(data)
@@ -335,13 +335,13 @@ fn parse_template_header(data: &[u8]) -> nom::IResult<&[u8], TemplateHeader> {
     named!(template_id <&[u8], u16>, map!(take!(2), be_buf_to_u16));
     named!(field_count <&[u8], u16>, map!(take!(2), be_buf_to_u16));
 
-    named!(template_header <&[u8], TemplateHeader>, chain!(
-        id: template_id ~
-        field_count: field_count,
-        || { TemplateHeader {
+    named!(template_header <&[u8], TemplateHeader>, do_parse!(
+        id: template_id >>
+        field_count: field_count >>
+        ( TemplateHeader {
             template_id: id,
             field_count: field_count
-        }}
+        })
     ));
 
     template_header(data)
@@ -385,10 +385,10 @@ fn parse_template_set(mut data: &[u8], set_header: SetHeader) -> nom::IResult<&[
 
     while data.len() > 0 as usize {
         let mut fields = Vec::<FieldSpecifier>::new();
-        if let nom::IResult::Done(bytes, header) = parse_template_header(&data) {
+        if let Ok((bytes, header)) = parse_template_header(&data) {
             data = bytes;
             for _ in 0..header.field_count {
-                if let nom::IResult::Done(bytes, field) = parse_field_specifier(data) {
+                if let Ok((bytes, field)) = parse_field_specifier(data) {
                     fields.push(field);
                     data = bytes;
                 }
@@ -405,7 +405,7 @@ fn parse_template_set(mut data: &[u8], set_header: SetHeader) -> nom::IResult<&[
         records: templates,
     });
 
-    nom::IResult::Done(data, result)
+    Ok((data, result))
 }
 
 #[inline]
@@ -422,15 +422,15 @@ fn parse_options_template_header(data: &[u8]) -> nom::IResult<&[u8], OptionsTemp
     named!(field_count <&[u8], u16>, map!(take!(2), be_buf_to_u16));
     named!(scope_field_count <&[u8], u16>, map!(take!(2), be_buf_to_u16));
 
-    named!(options_template_header <&[u8], OptionsTemplateHeader>, chain!(
-        id: template_id ~
-        field_count: field_count ~
-        scope_field_count: scope_field_count,
-        || { OptionsTemplateHeader {
+    named!(options_template_header <&[u8], OptionsTemplateHeader>, do_parse!(
+        id: template_id >>
+        field_count: field_count >>
+        scope_field_count: scope_field_count >>
+        (OptionsTemplateHeader {
             id: id,
             field_count: field_count,
             scope_field_count: scope_field_count
-        }}
+        })
     ));
 
     options_template_header(data)
@@ -470,10 +470,10 @@ fn parse_options_template_set(mut data: &[u8], set_header: SetHeader) -> nom::IR
 
     while data.len() > 0 as usize {
         let mut fields = Vec::<FieldSpecifier>::new();
-        if let nom::IResult::Done(bytes, header) = parse_options_template_header(&data) {
+        if let Ok((bytes, header)) = parse_options_template_header(&data) {
             data = bytes;
             for _ in 0..header.field_count {
-                if let nom::IResult::Done(bytes, field) = parse_field_specifier(data) {
+                if let Ok((bytes, field)) = parse_field_specifier(data) {
                     fields.push(field);
                     data = bytes;
                 }
@@ -490,7 +490,7 @@ fn parse_options_template_set(mut data: &[u8], set_header: SetHeader) -> nom::IR
         records: templates,
     });
 
-    nom::IResult::Done(data, result)
+    Ok((data, result))
 }
 
 #[inline]
@@ -529,11 +529,11 @@ fn parse_data_set<'a>(data: &'a [u8],
         records.push(DataRecord { values: values });
     }
 
-    nom::IResult::Done(data,
-                       Set::DataSet(DataSet {
-                           header: set_header,
-                           records: records,
-                       }))
+    Ok((data,
+        Set::DataSet(DataSet {
+            header: set_header,
+            records: records,
+        })))
 }
 
 #[inline]
@@ -572,9 +572,9 @@ fn parse_options_set<'a>(data: &'a [u8],
         records.push(DataRecord { values: values });
     }
 
-    nom::IResult::Done(data,
-                       Set::DataSet(DataSet {
-                           header: set_header,
-                           records: records,
-                       }))
+    Ok((data,
+        Set::DataSet(DataSet {
+            header: set_header,
+            records: records,
+        })))
 }

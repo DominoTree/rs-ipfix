@@ -49,19 +49,18 @@ fn mpls_stack(s: &[u8]) -> String {
 
     named!(parse_mpls_stack <&[u8], (u32, u8, u8)>, bits!(
         tuple!(
-            take_bits!( u32, 20 ),
-            take_bits!( u8, 3 ),
-            take_bits!( u8, 1 )
+            take_bits!( 1u32 ),
+            take_bits!( 1u8 ),
+            take_bits!( 1u8 )
         )
     ));
 
     //TODO: do some more conversions here
-    if let nom::IResult::Done(_, (label, exp, bottom)) = parse_mpls_stack(s) {
+    if let Ok((_, (label, exp, bottom))) = parse_mpls_stack(s) {
         format!(r#"{{"label":{},"exp":{},"bottom":{}}}"#,
                 label,
                 exp,
-                bottom == 1)
-            .into()
+                bottom == 1).into()
     } else {
         println!("{:?}", parse_mpls_stack(s));
         println!("MPLS STACK PARSING FAILED");
