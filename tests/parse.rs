@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
     extern crate ipfix;
-    use self::ipfix::IpfixConsumer;
+
+    use self::ipfix::{IpfixConsumer, DataRecordKey, DataRecordValue};
+    use std::net::Ipv4Addr;
 
     #[test]
     fn test_parse() {
@@ -116,11 +118,24 @@ mod tests {
         assert!(parser.parse_message(&template_bytes).is_ok());
         
         let datasets = parser.parse_message(&data_bytes).unwrap();
-        for dataset in datasets {
-            for datarecord in dataset.records {
+        for dataset in &datasets {
+            for datarecord in &dataset.records {
                 let json = datarecord.to_json().unwrap();
                 println!("{:?}", json);
             }
         }
+        assert!(datasets.len() == 3);
+        let d0 = &datasets[0];
+        assert!(d0.header.set_id == 999);
+        assert!(d0.header.length == 641);
+        assert!(d0.records.len() == 13);
+        let d0r0 = &d0.records[0];
+        assert!(d0r0.values.len() == 11);
+        let d0r0v = &d0r0.values;
+        
+        assert!(d0r0v.get(&DataRecordKey::Str("sourceIPv4Address")).unwrap() == &DataRecordValue::IPv4(Ipv4Addr::new(172, 19, 219, 50)));
+        assert!(d0r0v.get(&DataRecordKey::Str("flowEndMilliSeconds")).unwrap() == &DataRecordValue::U64(1479840960376));
+        assert!(d0r0v.get(&DataRecordKey::Str("destinationTransportPort")).unwrap() == &DataRecordValue::U16(53));
+        assert!(d0r0v.get(&DataRecordKey::Str("protocolIdentifier")).unwrap() == &DataRecordValue::U8(17));
     }
 }

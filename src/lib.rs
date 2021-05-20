@@ -42,9 +42,9 @@ pub enum Set<'a> {
 }
 
 #[derive(Nom, Debug)]
-struct SetHeader {
-    set_id: u16, // 2: Template Set, 3: Options Template Set, >255: Data Set
-    length: u16,
+pub struct SetHeader {
+    pub set_id: u16, // 2: Template Set, 3: Options Template Set, >255: Data Set
+    pub length: u16,
 }
 #[derive(Debug)]
 pub struct TemplateSet {
@@ -100,14 +100,14 @@ struct FieldSpecifier {
 #[derive(Debug)]
 pub struct DataSet<'a> {
     #[allow(dead_code)]
-    header: SetHeader,
+    pub header: SetHeader,
     pub records: Vec<DataRecord<'a>>,
 }
 
 #[derive(PartialEq, Debug, Serialize)]
 pub struct DataRecord<'a> {
     #[serde(flatten)]
-    values: HashMap<DataRecordKey<'a>, DataRecordValue<'a>>,
+    pub values: HashMap<DataRecordKey<'a>, DataRecordValue<'a>>,
 }
 
 #[derive(PartialEq, Eq, Hash, Debug, Serialize)]
