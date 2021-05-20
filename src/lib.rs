@@ -3,7 +3,6 @@ extern crate nom;
 extern crate nom_derive;
 extern crate serde;
 
-pub mod conversions;
 pub mod printer;
 
 pub use printer::*;
