@@ -7,20 +7,17 @@ pub mod printer;
 
 pub use printer::*;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, net::{Ipv4Addr, Ipv6Addr}};
 use nom_derive::{Nom, Parse};
-
-// Using binary trees allows the JSON output to stay in the same order for each record, but its performance is slower than a HashMap.
-// Should make functions generic and allow this to be changed by a bool flag.
-use std::collections::BTreeMap;
 
 pub struct IpfixConsumer {
     templates: HashMap<u16, Template>,
     options_templates: HashMap<u16, OptionsTemplate>,
+    formatters: ParserMapper,
 }
 
 #[allow(dead_code)]
-#[derive(Nom)]
+#[derive(Nom, Debug)]
 struct IpfixHeader {
     version: u16,
     length: u16,
@@ -30,47 +27,51 @@ struct IpfixHeader {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 struct IpfixMessage<'a> {
     header: IpfixHeader,
     sets: Vec<Set<'a>>,
 }
 
+#[derive(Debug)]
 pub enum Set<'a> {
     TemplateSet(TemplateSet),
     OptionsTemplateSet(OptionsTemplateSet),
     DataSet(DataSet<'a>),
 }
 
-#[derive(Nom)]
+#[derive(Nom, Debug)]
 struct SetHeader {
     set_id: u16, // 2: Template Set, 3: Options Template Set, >255: Data Set
     length: u16,
 }
+#[derive(Debug)]
 pub struct TemplateSet {
     #[allow(dead_code)]
     header: SetHeader,
     records: Vec<Template>,
 }
 
-#[derive(Nom)]
+#[derive(Nom, Debug)]
 struct TemplateHeader {
     template_id: u16,
     field_count: u16,
 }
-#[derive(Nom)]
+#[derive(Nom, Debug)]
 struct Template {
     header: TemplateHeader,
     #[nom(Count="header.field_count")]
     field_specifiers: Vec<FieldSpecifier>,
 }
 
+#[derive(Debug)]
 pub struct OptionsTemplateSet {
     #[allow(dead_code)]
     header: SetHeader,
     records: Vec<OptionsTemplate>,
 }
 
-#[derive(Nom)]
+#[derive(Nom, Debug)]
 struct OptionsTemplateHeader {
     id: u16,
     field_count: u16,
@@ -78,14 +79,14 @@ struct OptionsTemplateHeader {
     scope_field_count: u16,
 }
 
-#[derive(Nom)]
+#[derive(Nom, Debug)]
 struct OptionsTemplate {
     header: OptionsTemplateHeader,
     #[nom(Count="header.field_count")]
     field_specifiers: Vec<FieldSpecifier>,
 }
 
-#[derive(Nom)]
+#[derive(Nom, Debug)]
 struct FieldSpecifier {
     #[nom(PostExec="let ident = if ident > 32767 { ident - 32768 } else { ident };")]
     ident: u16, // 15b in msg
@@ -95,15 +96,33 @@ struct FieldSpecifier {
     enterprise_number: Option<u32>,
 }
 
+#[derive(Debug)]
 pub struct DataSet<'a> {
     #[allow(dead_code)]
     header: SetHeader,
     records: Vec<DataRecord<'a>>,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub struct DataRecord<'a> {
-    values: BTreeMap<u16, &'a [u8]>,
+    values: HashMap<DataRecordKey<'a>, DataRecordValue<'a>>,
+}
+#[derive(PartialEq, Eq, Hash, Debug)]
+pub enum DataRecordKey<'a> {
+    Str(&'a str),
+    U16(u16)
+}
+
+#[derive(PartialEq, Debug)]
+pub enum DataRecordValue<'a> {
+    IPv4(Ipv4Addr),
+    IPv6(Ipv6Addr),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    String(String),
+    Bytes(&'a [u8])
 }
 
 impl IpfixConsumer {
@@ -111,6 +130,7 @@ impl IpfixConsumer {
         IpfixConsumer {
             templates: HashMap::new(),
             options_templates: HashMap::new(),
+            formatters: get_default_parsers()
         }
     }
 
@@ -158,12 +178,12 @@ impl IpfixConsumer {
                                 let template = {
                                     self.templates.get(&set_header.set_id).unwrap()
                                 };
-                                Some(parse_data_set(set_bytes, set_header, template))
+                                Some(parse_data_set(set_bytes, set_header, template, &self.formatters))
                             } else if self.options_templates.contains_key(&set_header.set_id) {
                                 let options_template = {
                                     self.options_templates.get(&set_header.set_id).unwrap()
                                 };
-                                Some(parse_options_set(set_bytes, set_header, options_template))
+                                Some(parse_options_set(set_bytes, set_header, options_template, &self.formatters))
                             } else {
                                 None
                             }
@@ -194,14 +214,6 @@ impl IpfixConsumer {
             return Ok(datasets);
         }
         Err("Parsing failed")
-    }
-}
-
-impl<'a> DataRecord<'a> {
-    pub fn to_json(&self) {
-        for field in &self.values {
-            println!("{:?}", field);
-        }
     }
 }
 
@@ -292,7 +304,8 @@ fn parse_options_template_set(input: &[u8], set_header: SetHeader) -> nom::IResu
 #[inline]
 fn parse_data_set<'a>(data: &'a [u8],
                       set_header: SetHeader,
-                      template: &Template)
+                      template: &Template,
+                      formatters: &ParserMapper)
                       -> nom::IResult<&'a [u8], Set<'a>> {
     //  0                   1                   2                   3
     //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -316,10 +329,17 @@ fn parse_data_set<'a>(data: &'a [u8],
     let mut offset = 0;
 
     while offset < data.len() {
-        let mut values = BTreeMap::<u16, &[u8]>::new();
+        let mut values = HashMap::new();
         for field in &template.field_specifiers {
             let bytes = &data[offset..offset + field.field_length as usize];
-            values.insert(field.ident, bytes);
+            
+            if let Some(&(name, formatter)) = formatters.get(&field.ident) {
+                let drv = formatter(bytes);
+                values.insert(DataRecordKey::Str(name), drv);
+            } else {
+                values.insert(DataRecordKey::U16(field.ident), DataRecordValue::Bytes(bytes));
+            }
+
             offset += field.field_length as usize;
         }
         records.push(DataRecord { values: values });
@@ -335,7 +355,8 @@ fn parse_data_set<'a>(data: &'a [u8],
 #[inline]
 fn parse_options_set<'a>(data: &'a [u8],
                          set_header: SetHeader,
-                         template: &OptionsTemplate)
+                         template: &OptionsTemplate,
+                         formatters: &ParserMapper)
                          -> nom::IResult<&'a [u8], Set<'a>> {
     //  0                   1                   2                   3
     //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -359,10 +380,17 @@ fn parse_options_set<'a>(data: &'a [u8],
     let mut offset = 0;
 
     while offset < data.len() {
-        let mut values = BTreeMap::<u16, &[u8]>::new();
+        let mut values = HashMap::new();
         for field in &template.field_specifiers {
             let bytes = &data[offset..offset + field.field_length as usize];
-            values.insert(field.ident, bytes);
+
+            if let Some(&(name, formatter)) = formatters.get(&field.ident) {
+                let drv = formatter(bytes);
+                values.insert(DataRecordKey::Str(name), drv);
+            } else {
+                values.insert(DataRecordKey::U16(field.ident), DataRecordValue::Bytes(bytes));
+            }
+
             offset += field.field_length as usize;
         }
         records.push(DataRecord { values: values });

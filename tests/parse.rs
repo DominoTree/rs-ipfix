@@ -1,10 +1,7 @@
 #[cfg(test)]
 mod tests {
     extern crate ipfix;
-
-    use std::io::prelude::*;
-    use std::fs::File;
-    use self::ipfix::{IpfixConsumer, IpfixPrinter};
+    use self::ipfix::IpfixConsumer;
 
     #[test]
     fn test_parse() {
@@ -31,7 +28,6 @@ mod tests {
              0x00, 0x3A, 0x00, 0x02, 0x00, 0x3D, 0x00, 0x01, 0x00, 0x3E, 0x00, 0x10, 0x00, 0x46,
              0x00, 0x03, 0x00, 0x88, 0x00, 0x01, 0x00, 0x8B, 0x00, 0x02, 0x00, 0x98, 0x00, 0x08,
              0x00, 0x99, 0x00, 0x08, 0x00, 0xF3, 0x00, 0x02, 0x00, 0xF5, 0x00, 0x02];
-        let template = Box::new(template_bytes);
 
         // contains data sets for templates 999, 500, 999
         let data_bytes: [u8; 1093] =
@@ -114,27 +110,29 @@ mod tests {
              0x8C, 0x42, 0xA3, 0x00, 0x35, 0xAC, 0x18, 0x8F, 0x2A, 0x08, 0x00, 0x00, 0x00, 0x00,
              0x00, 0x01, 0x58, 0x8D, 0x65, 0x0F, 0x78, 0x00, 0x00, 0x01, 0x58, 0x8D, 0x65, 0x0F,
              0x78];
-        let data = Box::new(data_bytes);
 
         let mut parser = IpfixConsumer::new();
         
-        let printer = IpfixPrinter::new();
+        // let printer = IpfixPrinter::new();
 
-        assert!(parser.parse_message(&*template).is_ok());
+        assert!(parser.parse_message(&template_bytes).is_ok());
         
-        if let Ok(datarecords) = parser.parse_message(&*data) {
-            let mut test_string = String::new();
-            for datarecord in datarecords {
-                let flows = printer.print_json(datarecord);
-                for flow in flows {
-                    test_string += &flow;
-                }
-            }
+        let _datarecords = parser.parse_message(&data_bytes).unwrap();
+        
+        // println!("{:?}", x);
+        // if let Ok(datarecords) = parser.parse_message(&*data) {
+        //     let mut test_string = String::new();
+        //     for datarecord in datarecords {
+        //         let flows = printer.print_json(datarecord);
+        //         for flow in flows {
+        //             test_string += &flow;
+        //         }
+        //     }
 
-            let mut f = File::open("tests/string.txt").unwrap();
-            let mut s = String::new();
-            f.read_to_string(&mut s).unwrap();
-            assert_eq!(s, test_string);
-        }
+        //     let mut f = File::open("tests/string.txt").unwrap();
+        //     let mut s = String::new();
+        //     f.read_to_string(&mut s).unwrap();
+        //     assert_eq!(s, test_string);
+        // }
     }
 }
