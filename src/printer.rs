@@ -2,7 +2,7 @@ extern crate nom;
 
 use std::collections::HashMap;
 use nom::number::complete::{be_u128, be_u16, be_u32, be_u64};
-use crate::DataRecordValue;
+use crate::{DataRecord, DataRecordValue};
 
 #[inline]
 pub fn be_int(s: &[u8]) -> DataRecordValue {
@@ -77,14 +77,11 @@ fn mpls_stack(s: &[u8]) -> DataRecordValue {
 
     //TODO: do some more conversions here
     if let Ok((_, (label, exp, bottom))) = parse_mpls_stack(s) {
-        DataRecordValue::String(format!(r#"{{"label":{},"exp":{},"bottom":{}}}"#,
-                label,
-                exp,
-                bottom == 1).into())
+        DataRecordValue::MPLS(label, exp, bottom)
     } else {
         println!("{:?}", parse_mpls_stack(s));
         println!("MPLS STACK PARSING FAILED");
-        DataRecordValue::String("{}".into())
+        DataRecordValue::Bytes(s)
     }
 }
 

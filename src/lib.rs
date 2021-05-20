@@ -128,13 +128,14 @@ pub enum DataRecordValue<'a> {
     U32(u32),
     U64(u64),
     String(String),
-    Bytes(&'a [u8])
+    Bytes(&'a [u8]),
+    MPLS(u32, u8, u8)
 }
 
 impl<'a> DataRecord<'a> {
     // json serialize the DataRecord
     pub fn to_json(&self) -> serde_json::Result<String> {
-        Ok(serde_json::to_string(&self)?)
+        serde_json::to_string(&self)
     }
 }
 
@@ -179,7 +180,7 @@ impl IpfixConsumer {
                     remaining_bytes = &[];
                 }
                 
-                let set = match set_header.set_id.clone() {
+                let set = match set_header.set_id {
                     2 => Some(parse_template_set(set_bytes, set_header)),
                     3 => Some(parse_options_template_set(set_bytes, set_header)),
                     _ => { // data set
@@ -214,7 +215,7 @@ impl IpfixConsumer {
                 }
             }
 
-            if remaining_bytes.len() == 0 as usize {
+            if remaining_bytes.is_empty() {
                 break;
             }
         }
@@ -348,13 +349,13 @@ fn parse_data_set<'a>(data: &'a [u8],
 
             offset += field.field_length as usize;
         }
-        records.push(DataRecord { values: values });
+        records.push(DataRecord { values });
     }
 
     Ok((data,
         Set::DataSet(DataSet {
             header: set_header,
-            records: records,
+            records,
         })))
 }
 
@@ -399,12 +400,12 @@ fn parse_options_set<'a>(data: &'a [u8],
 
             offset += field.field_length as usize;
         }
-        records.push(DataRecord { values: values });
+        records.push(DataRecord { values });
     }
 
     Ok((data,
         Set::DataSet(DataSet {
             header: set_header,
-            records: records,
+            records,
         })))
 }
