@@ -1,13 +1,14 @@
 #[macro_use]
 extern crate nom;
+extern crate nom_derive;
 
 pub mod conversions;
 pub mod printer;
 
 pub use printer::*;
 
-use conversions::*;
 use std::collections::HashMap;
+use nom_derive::{Nom, Parse};
 
 // Using binary trees allows the JSON output to stay in the same order for each record, but its performance is slower than a HashMap.
 // Should make functions generic and allow this to be changed by a bool flag.
@@ -19,6 +20,7 @@ pub struct IpfixConsumer {
 }
 
 #[allow(dead_code)]
+#[derive(Nom)]
 struct IpfixHeader {
     version: u16,
     length: u16,
@@ -39,6 +41,7 @@ pub enum Set<'a> {
     DataSet(DataSet<'a>),
 }
 
+#[derive(Nom)]
 struct SetHeader {
     set_id: u16, // 2: Template Set, 3: Options Template Set, >255: Data Set
     length: u16,
@@ -49,13 +52,15 @@ pub struct TemplateSet {
     records: Vec<Template>,
 }
 
+#[derive(Nom)]
 struct TemplateHeader {
     template_id: u16,
     field_count: u16,
 }
-
+#[derive(Nom)]
 struct Template {
     header: TemplateHeader,
+    #[nom(Count="header.field_count")]
     field_specifiers: Vec<FieldSpecifier>,
 }
 
@@ -65,6 +70,7 @@ pub struct OptionsTemplateSet {
     records: Vec<OptionsTemplate>,
 }
 
+#[derive(Nom)]
 struct OptionsTemplateHeader {
     id: u16,
     field_count: u16,
@@ -72,14 +78,19 @@ struct OptionsTemplateHeader {
     scope_field_count: u16,
 }
 
+#[derive(Nom)]
 struct OptionsTemplate {
     header: OptionsTemplateHeader,
+    #[nom(Count="header.field_count")]
     field_specifiers: Vec<FieldSpecifier>,
 }
 
+#[derive(Nom)]
 struct FieldSpecifier {
+    #[nom(PostExec="let ident = if ident > 32767 { ident - 32768 } else { ident };")]
     ident: u16, // 15b in msg
     field_length: u16,
+    #[nom(If="ident > 32767")]
     #[allow(dead_code)]
     enterprise_number: Option<u32>,
 }
@@ -120,11 +131,11 @@ impl IpfixConsumer {
         // this should be 1:1 with UDP datagrams
         // we aren't currently using any of the data from the ipfix message header but we still
         // need to chop it off
-        if let Ok((bytes, _)) = parse_ipfix_header(data) {
+        if let Ok((bytes, _)) = IpfixHeader::parse(data) {
             let mut remaining_bytes = bytes;
             let mut datasets = Vec::<DataSet>::new();
             loop {
-                if let Ok((bytes, set_header)) = parse_set_header(remaining_bytes) {
+                if let Ok((bytes, set_header)) = SetHeader::parse(remaining_bytes) {
                     let set_length = (set_header.length - 4) as usize;
                     let set_bytes = &bytes.clone()[0..set_length];
                     if bytes.len() - set_length > 0 {
@@ -195,160 +206,7 @@ impl<'a> DataRecord<'a> {
 }
 
 #[inline]
-pub fn is_template_set(data: &[u8]) -> Result<bool, &'static str> {
-    // big-endian 0x0f-0x10
-    if data.len() >= 18 {
-        let id = conversions::be_buf_to_u16(&data[16..18]);
-        Ok(id == 2 || id == 3)
-    } else {
-        Err("Data too short".into())
-    }
-}
-
-#[inline]
-pub fn get_message_length(data: &[u8]) -> Result<u16, &'static str> {
-    // big-endian, 0x02-0x03
-    if data.len() >= 3 {
-        Ok(conversions::be_buf_to_u16(&data[2..4]))
-    } else {
-        Err("Data too short".into())
-    }
-}
-
-#[inline]
-fn parse_ipfix_header(data: &[u8]) -> nom::IResult<&[u8], IpfixHeader> {
-    //  0                   1                   2                   3
-    //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |       Version Number          |            Length             |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |                           Export Time                         |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |                       Sequence Number                         |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |                    Observation Domain ID                      |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-    named!(ipfix_version <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-    named!(message_length <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-    named!(export_time <&[u8], u32>, map!(take!(4), be_buf_to_u32));
-    named!(sequence_number <&[u8], u32>, map!(take!(4), be_buf_to_u32));
-    named!(observation_domain_id <&[u8], u32>, map!(take!(4), be_buf_to_u32));
-
-    named!(ipfix_header <&[u8], IpfixHeader>, do_parse!(
-        version: ipfix_version >>
-        length: message_length >>
-        time: export_time >>
-        sequence: sequence_number >>
-        domain_id: observation_domain_id >>
-        (IpfixHeader {
-            version: version,
-            length: length,
-            export_time: time,
-            sequence_number: sequence,
-            observation_domain_id: domain_id
-        })
-    ));
-
-    ipfix_header(&data)
-}
-
-#[inline]
-fn parse_field_specifier(data: &[u8]) -> nom::IResult<&[u8], FieldSpecifier> {
-    // 0                   1                   2                   3
-    // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |E|  Information Element ident. |        Field Length           |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |                      Enterprise Number                        |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-    // if greater than 2^15, bit is 1, and subtract 2^15 for ident
-    named!(element_ident_with_enterprise_bit <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-    named!(field_length <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-    named!(enterprise_number <&[u8], u32>, map!(take!(4), be_buf_to_u32));
-
-    named!(enterprise_field_specifier<&[u8], (u16, u32)>, tuple!(
-        field_length,
-        enterprise_number
-    ));
-
-    if let Ok((bytes, id)) = element_ident_with_enterprise_bit(data) {
-        // pull off the first bit
-        if id > 32767 {
-            if let Ok((remaining_data, (field_length, enterprise_number))) =
-                enterprise_field_specifier(bytes) {
-                return Ok((remaining_data,
-                        FieldSpecifier {
-                            enterprise_number: Some(enterprise_number),
-                            ident: id - 32768,
-                            field_length: field_length,
-                        }));
-            }
-        } else {
-            if let Ok((remaining_data, field_length)) = field_length(bytes) {
-                return Ok((remaining_data,
-                                          FieldSpecifier {
-                                              enterprise_number: None,
-                                              ident: id,
-                                              field_length: field_length,
-                                          }));
-            }
-        }
-    }
-    
-    Err(nom::Err::Incomplete(nom::Needed::Unknown))
-}
-
-
-#[inline]
-fn parse_set_header(data: &[u8]) -> nom::IResult<&[u8], SetHeader> {
-    //  0                   1                   2                   3
-    //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |          Set ID               |          Length               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-    named!(set_id <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-    named!(set_length <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-
-    named!(set_header <&[u8], SetHeader>, do_parse!(
-        id: set_id >>
-        length: set_length >>
-        ( SetHeader {
-            set_id: id,
-            length: length
-        })
-    ));
-
-    set_header(data)
-}
-
-#[inline]
-fn parse_template_header(data: &[u8]) -> nom::IResult<&[u8], TemplateHeader> {
-    // 0                   1                   2                   3
-    // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |      Template ID (> 255)      |         Field Count           |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-    named!(template_id <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-    named!(field_count <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-
-    named!(template_header <&[u8], TemplateHeader>, do_parse!(
-        id: template_id >>
-        field_count: field_count >>
-        ( TemplateHeader {
-            template_id: id,
-            field_count: field_count
-        })
-    ));
-
-    template_header(data)
-}
-
-#[inline]
-fn parse_template_set(mut data: &[u8], set_header: SetHeader) -> nom::IResult<&[u8], Set> {
+fn parse_template_set(input: &[u8], set_header: SetHeader) -> nom::IResult<&[u8], Set> {
     //  0                   1                   2                   3
     //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -381,63 +239,20 @@ fn parse_template_set(mut data: &[u8], set_header: SetHeader) -> nom::IResult<&[
     // |                          Padding (opt)                        |
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
-    let mut templates = Vec::<Template>::new();
+    named!(parse_many_templates<Vec<Template>>, many0!(complete!(Template::parse)));
 
-    while data.len() > 0 as usize {
-        let mut fields = Vec::<FieldSpecifier>::new();
-        if let Ok((bytes, header)) = parse_template_header(&data) {
-            data = bytes;
-            for _ in 0..header.field_count {
-                if let Ok((bytes, field)) = parse_field_specifier(data) {
-                    fields.push(field);
-                    data = bytes;
-                }
-            }
-            templates.push(Template {
-                header: header,
-                field_specifiers: fields,
-            });
-        }
-    }
+    let (rest, templates) = parse_many_templates(input)?;
 
     let result = Set::TemplateSet(TemplateSet {
         header: set_header,
         records: templates,
     });
 
-    Ok((data, result))
+    Ok((rest, result))
 }
 
 #[inline]
-fn parse_options_template_header(data: &[u8]) -> nom::IResult<&[u8], OptionsTemplateHeader> {
-    //  0                   1                   2                   3
-    //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |         Template ID (> 255)   |         Field Count           |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |      Scope Field Count        |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-    named!(template_id <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-    named!(field_count <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-    named!(scope_field_count <&[u8], u16>, map!(take!(2), be_buf_to_u16));
-
-    named!(options_template_header <&[u8], OptionsTemplateHeader>, do_parse!(
-        id: template_id >>
-        field_count: field_count >>
-        scope_field_count: scope_field_count >>
-        (OptionsTemplateHeader {
-            id: id,
-            field_count: field_count,
-            scope_field_count: scope_field_count
-        })
-    ));
-
-    options_template_header(data)
-}
-
-#[inline]
-fn parse_options_template_set(mut data: &[u8], set_header: SetHeader) -> nom::IResult<&[u8], Set> {
+fn parse_options_template_set(input: &[u8], set_header: SetHeader) -> nom::IResult<&[u8], Set> {
     //  0                   1                   2                   3
     //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -462,35 +277,16 @@ fn parse_options_template_set(mut data: &[u8], set_header: SetHeader) -> nom::IR
     // |     Option M Field Length     |      Padding (optional)       |
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
-    //    if let nom::IResult::Done(bytes, header) = parse_options_template_header(&data) {
+    named!(parse_many_options_templates<Vec<OptionsTemplate>>, many0!(complete!(OptionsTemplate::parse)));
 
-    //TODO: merge this into parse_template_set
-
-    let mut templates = Vec::<OptionsTemplate>::new();
-
-    while data.len() > 0 as usize {
-        let mut fields = Vec::<FieldSpecifier>::new();
-        if let Ok((bytes, header)) = parse_options_template_header(&data) {
-            data = bytes;
-            for _ in 0..header.field_count {
-                if let Ok((bytes, field)) = parse_field_specifier(data) {
-                    fields.push(field);
-                    data = bytes;
-                }
-            }
-            templates.push(OptionsTemplate {
-                header: header,
-                field_specifiers: fields,
-            });
-        }
-    }
+    let (rest, templates) = parse_many_options_templates(input)?;
 
     let result = Set::OptionsTemplateSet(OptionsTemplateSet {
         header: set_header,
         records: templates,
     });
 
-    Ok((data, result))
+    Ok((rest, result))
 }
 
 #[inline]

@@ -8,4 +8,5 @@ repository = "https://github.com/dominotree/rs-ipfix"
 license = "MIT"
 
 [dependencies]
+nom-derive = "0.8.0"
 nom = { version = "6.1.2" }
