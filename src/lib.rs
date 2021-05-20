@@ -20,6 +20,7 @@ pub struct IpfixConsumer {
 #[allow(dead_code)]
 #[derive(Nom, Debug)]
 struct IpfixHeader {
+    #[nom(Verify="*version == 10")]
     version: u16,
     length: u16,
     export_time: u32,
@@ -186,7 +187,7 @@ impl IpfixConsumer {
                             let template = self.templates.get(&set_header.set_id).unwrap();
                             Some(parse_data_set(set_bytes, set_header, template, &self.formatters))
                         } else if self.options_templates.contains_key(&set_header.set_id) {
-                            let options_template = self.options_templates.get(&set_header.set_id).unwrap()
+                            let options_template = self.options_templates.get(&set_header.set_id).unwrap();
                             Some(parse_options_set(set_bytes, set_header, options_template, &self.formatters))
                         } else {
                             None
