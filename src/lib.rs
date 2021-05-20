@@ -159,73 +159,66 @@ impl IpfixConsumer {
     }
 
     #[inline]
-    pub fn parse_message<'a>(&'a mut self, data: &'a [u8]) -> Result<Vec<DataSet>, &'static str> {
+    pub fn parse_message<'a>(&'a mut self, data: &'a [u8]) -> nom::IResult<&'a [u8], Vec<DataSet>> {
         // this should be 1:1 with UDP datagrams
         // we aren't currently using any of the data from the ipfix message header but we still
         // need to chop it off
-        if let Ok((bytes, _)) = IpfixHeader::parse(data) {
-            let mut remaining_bytes = bytes;
-            let mut datasets = Vec::<DataSet>::new();
-            loop {
-                if let Ok((bytes, set_header)) = SetHeader::parse(remaining_bytes) {
-                    let set_length = (set_header.length - 4) as usize;
-                    let set_bytes = &bytes.clone()[0..set_length];
-                    if bytes.len() - set_length > 0 {
-                        remaining_bytes = &bytes[set_length..bytes.len()];
-                    } else {
-                        remaining_bytes = &[];
-                    }
-                    let set = match set_header.set_id.clone() {
-                        2 => {
-                            // template set
-                            Some(parse_template_set(set_bytes, set_header))
-                        }
-                        3 => {
-                            // options template set
-                            Some(parse_options_template_set(set_bytes, set_header))
-                        }
-                        _ => {
-                            // data set
-                            if self.templates.contains_key(&set_header.set_id) {
-                                let template = {
-                                    self.templates.get(&set_header.set_id).unwrap()
-                                };
-                                Some(parse_data_set(set_bytes, set_header, template, &self.formatters))
-                            } else if self.options_templates.contains_key(&set_header.set_id) {
-                                let options_template = {
-                                    self.options_templates.get(&set_header.set_id).unwrap()
-                                };
-                                Some(parse_options_set(set_bytes, set_header, options_template, &self.formatters))
-                            } else {
-                                None
-                            }
-                        }
-                    };
-                    if let Some(Ok((_, object))) = set {
-                        match object {
-                            Set::TemplateSet(set) => {
-                                for template in set.records {
-                                    self.add_template(template);
-                                }
-                            }
-                            Set::OptionsTemplateSet(set) => {
-                                for template in set.records {
-                                    self.add_options_template(template);
-                                }
-                            }
-                            Set::DataSet(dataset) => {
-                                datasets.push(dataset);
-                            }
-                        }
-                    }
+        let (bytes, _)= IpfixHeader::parse(data)?;
+        let mut remaining_bytes = bytes;
+        let mut datasets = Vec::<DataSet>::new();
+        
+        loop {
+            if let Ok((bytes, set_header)) = SetHeader::parse(remaining_bytes) {
+                let set_length = (set_header.length - 4) as usize;
+                let set_bytes = &bytes[0..set_length];
+                
+                if bytes.len() - set_length > 0 {
+                    remaining_bytes = &bytes[set_length..bytes.len()];
+                } else {
+                    remaining_bytes = &[];
                 }
-                if remaining_bytes.len() == 0 as usize {
-                    break;
+                
+                let set = match set_header.set_id.clone() {
+                    2 => Some(parse_template_set(set_bytes, set_header)),
+                    3 => Some(parse_options_template_set(set_bytes, set_header)),
+                    _ => { // data set
+                        if self.templates.contains_key(&set_header.set_id) {
+                            let template = self.templates.get(&set_header.set_id).unwrap();
+                            Some(parse_data_set(set_bytes, set_header, template, &self.formatters))
+                        } else if self.options_templates.contains_key(&set_header.set_id) {
+                            let options_template = self.options_templates.get(&set_header.set_id).unwrap()
+                            Some(parse_options_set(set_bytes, set_header, options_template, &self.formatters))
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                if let Some(Ok((_, object))) = set {
+                    match object {
+                        Set::TemplateSet(set) => {
+                            for template in set.records {
+                                self.add_template(template);
+                            }
+                        }
+                        Set::OptionsTemplateSet(set) => {
+                            for template in set.records {
+                                self.add_options_template(template);
+                            }
+                        }
+                        Set::DataSet(dataset) => {
+                            datasets.push(dataset);
+                        }
+                    }
                 }
             }
-            return Ok(datasets);
+
+            if remaining_bytes.len() == 0 as usize {
+                break;
+            }
         }
-        Err("Parsing failed")
+        
+        Ok((remaining_bytes, datasets))
     }
 }
 

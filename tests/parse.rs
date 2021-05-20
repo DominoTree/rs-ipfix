@@ -117,7 +117,7 @@ mod tests {
         
         assert!(parser.parse_message(&template_bytes).is_ok());
         
-        let datasets = parser.parse_message(&data_bytes).unwrap();
+        let (_, datasets) = parser.parse_message(&data_bytes).unwrap();
         for dataset in &datasets {
             for datarecord in &dataset.records {
                 let json = datarecord.to_json().unwrap();
