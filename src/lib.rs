@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate nom;
 extern crate nom_derive;
+extern crate serde;
 
 pub mod conversions;
 pub mod printer;
@@ -9,6 +10,7 @@ pub use printer::*;
 
 use std::{collections::HashMap, net::{Ipv4Addr, Ipv6Addr}};
 use nom_derive::{Nom, Parse};
+use serde::Serialize;
 
 pub struct IpfixConsumer {
     templates: HashMap<u16, Template>,
@@ -100,20 +102,24 @@ struct FieldSpecifier {
 pub struct DataSet<'a> {
     #[allow(dead_code)]
     header: SetHeader,
-    records: Vec<DataRecord<'a>>,
+    pub records: Vec<DataRecord<'a>>,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Serialize)]
 pub struct DataRecord<'a> {
+    #[serde(flatten)]
     values: HashMap<DataRecordKey<'a>, DataRecordValue<'a>>,
 }
-#[derive(PartialEq, Eq, Hash, Debug)]
+
+#[derive(PartialEq, Eq, Hash, Debug, Serialize)]
+#[serde(untagged)]
 pub enum DataRecordKey<'a> {
     Str(&'a str),
     U16(u16)
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Serialize)]
+#[serde(untagged)]
 pub enum DataRecordValue<'a> {
     IPv4(Ipv4Addr),
     IPv6(Ipv6Addr),
@@ -123,6 +129,13 @@ pub enum DataRecordValue<'a> {
     U64(u64),
     String(String),
     Bytes(&'a [u8])
+}
+
+impl<'a> DataRecord<'a> {
+    // json serialize the DataRecord
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        Ok(serde_json::to_string(&self)?)
+    }
 }
 
 impl IpfixConsumer {

@@ -113,26 +113,14 @@ mod tests {
 
         let mut parser = IpfixConsumer::new();
         
-        // let printer = IpfixPrinter::new();
-
         assert!(parser.parse_message(&template_bytes).is_ok());
         
-        let _datarecords = parser.parse_message(&data_bytes).unwrap();
-        
-        // println!("{:?}", x);
-        // if let Ok(datarecords) = parser.parse_message(&*data) {
-        //     let mut test_string = String::new();
-        //     for datarecord in datarecords {
-        //         let flows = printer.print_json(datarecord);
-        //         for flow in flows {
-        //             test_string += &flow;
-        //         }
-        //     }
-
-        //     let mut f = File::open("tests/string.txt").unwrap();
-        //     let mut s = String::new();
-        //     f.read_to_string(&mut s).unwrap();
-        //     assert_eq!(s, test_string);
-        // }
+        let datasets = parser.parse_message(&data_bytes).unwrap();
+        for dataset in datasets {
+            for datarecord in dataset.records {
+                let json = datarecord.to_json().unwrap();
+                println!("{:?}", json);
+            }
+        }
     }
 }
