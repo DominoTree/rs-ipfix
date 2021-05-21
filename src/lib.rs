@@ -5,6 +5,7 @@ extern crate serde;
 
 pub mod printer;
 
+use nom::number::complete::be_u8;
 pub use printer::*;
 
 use std::{collections::HashMap, net::{Ipv4Addr, Ipv6Addr}};
@@ -12,27 +13,27 @@ use nom_derive::{Nom, Parse};
 use serde::Serialize;
 
 pub struct IpfixConsumer {
-    templates: HashMap<u16, Template>,
-    options_templates: HashMap<u16, OptionsTemplate>,
+    pub templates: HashMap<u16, Template>,
+    pub options_templates: HashMap<u16, OptionsTemplate>,
     formatters: ParserMapper,
 }
 
 #[allow(dead_code)]
 #[derive(Nom, Debug)]
-struct IpfixHeader {
+pub struct IpfixHeader {
     #[nom(Verify="*version == 10")]
-    version: u16,
-    length: u16,
-    export_time: u32,
-    sequence_number: u32,
-    observation_domain_id: u32,
+    pub version: u16,
+    pub length: u16,
+    pub export_time: u32,
+    pub sequence_number: u32,
+    pub observation_domain_id: u32,
 }
 
 #[allow(dead_code)]
 #[derive(Debug)]
-struct IpfixMessage<'a> {
-    header: IpfixHeader,
-    sets: Vec<Set<'a>>,
+pub struct IpfixMessage<'a> {
+    pub header: IpfixHeader,
+    pub sets: Vec<Set<'a>>,
 }
 
 #[derive(Debug)]
@@ -50,52 +51,59 @@ pub struct SetHeader {
 #[derive(Debug)]
 pub struct TemplateSet {
     #[allow(dead_code)]
-    header: SetHeader,
-    records: Vec<Template>,
+    pub header: SetHeader,
+    pub records: Vec<Template>,
 }
 
 #[derive(Nom, Debug)]
-struct TemplateHeader {
-    template_id: u16,
-    field_count: u16,
+pub struct TemplateHeader {
+    pub template_id: u16,
+    pub field_count: u16,
 }
 #[derive(Nom, Debug)]
-struct Template {
-    header: TemplateHeader,
+pub struct Template {
+    pub header: TemplateHeader,
     #[nom(Count="header.field_count")]
-    field_specifiers: Vec<FieldSpecifier>,
+    pub field_specifiers: Vec<FieldSpecifier>,
 }
 
 #[derive(Debug)]
 pub struct OptionsTemplateSet {
     #[allow(dead_code)]
-    header: SetHeader,
-    records: Vec<OptionsTemplate>,
+    pub header: SetHeader,
+    pub records: Vec<OptionsTemplate>,
 }
 
 #[derive(Nom, Debug)]
-struct OptionsTemplateHeader {
-    id: u16,
-    field_count: u16,
+pub struct OptionsTemplateHeader {
+    pub id: u16,
+    pub field_count: u16,
     #[allow(dead_code)]
-    scope_field_count: u16,
+    pub scope_field_count: u16,
 }
 
 #[derive(Nom, Debug)]
-struct OptionsTemplate {
-    header: OptionsTemplateHeader,
+pub struct OptionsTemplate {
+    pub header: OptionsTemplateHeader,
     #[nom(Count="header.field_count")]
-    field_specifiers: Vec<FieldSpecifier>,
+    pub field_specifiers: Vec<FieldSpecifier>,
 }
 
 #[derive(Nom, Debug)]
-struct FieldSpecifier {
-    #[nom(PostExec="let ident = if ident > 32767 { ident - 32768 } else { ident };")]
-    ident: u16, // 15b in msg
-    field_length: u16,
-    #[nom(If="ident > 32767")]
+pub struct FieldSpecifier {
+    temp_ident: u16,
+    #[nom(Ignore, PostExec="let ident = if temp_ident > 32767 { temp_ident - 32768} else { temp_ident };")]
+    pub ident: u16,
+    pub field_length: u16,
+    #[nom(Cond="temp_ident > 32767")]
     #[allow(dead_code)]
-    enterprise_number: Option<u32>,
+    pub enterprise_number: Option<u32>,
+
+    // to be used to handle the different FS cases
+    #[nom(Ignore, PostExec="let is_variable = field_length == 65535;")]
+    is_variable: bool,
+    #[nom(Ignore, PostExec="let is_pen = enterprise_number.is_some();")]
+    is_pen: bool,
 }
 
 #[derive(Debug)]
@@ -308,6 +316,51 @@ fn parse_options_template_set(input: &[u8], set_header: SetHeader) -> nom::IResu
     Ok((rest, result))
 }
 
+// take a field from input, if field_size indicates variable field,
+// then take u8 from input and use it as size
+fn take_field(input: &[u8], field_size: u16) -> nom::IResult<&[u8], &[u8]> {
+    if field_size == 65535 {
+        let (rest, actual_size) = call!(input, be_u8)?;
+        take!(rest, actual_size)
+    } else {
+        take!(input, field_size)
+    }
+}
+
+// based on `takes` which is a vector of tuples (field_id, field_size) do `take_field`
+fn take_fields(input: &[u8], takes: Vec<(u16, u16)>) -> nom::IResult<&[u8], HashMap::<u16, &[u8]>> {
+    
+    let mut values = HashMap::<u16, &[u8]>::new();
+    let mut rest = input;
+    for (field_ident, field_size) in takes {
+        let (more, field_buf) = take_field(&rest, field_size)?;
+        rest = more;
+        values.insert(field_ident, field_buf);
+    }
+
+    Ok((rest, values))
+}
+
+// Given DataRecord values apply value_parses on it.
+// TODO : we need to parse while respecting fields with PEN so we need to support
+// various ones so we can format correctly for various vendors.
+fn enrich_fields<'a>(values: &HashMap<u16, &'a [u8]>, value_parsers: &ParserMapper) -> HashMap<DataRecordKey<'a>, DataRecordValue<'a>> {
+    let hs = values.iter()
+    .map(|(val_id, val_bytes)| -> (DataRecordKey, DataRecordValue) {
+        match value_parsers.get(val_id) {
+            Some((field_name, field_parser)) => {
+                let parsed_val = field_parser(val_bytes);
+                (DataRecordKey::Str(field_name), parsed_val)
+            },
+            None => {
+                (DataRecordKey::U16(*val_id), DataRecordValue::Bytes(*val_bytes))
+            }
+        }
+    }).collect();
+
+    hs
+}
+
 #[inline]
 fn parse_data_set<'a>(data: &'a [u8],
                       set_header: SetHeader,
@@ -331,28 +384,35 @@ fn parse_data_set<'a>(data: &'a [u8],
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     // |              ...              |      Padding (optional)       |
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    let mut temp_buf = data;
 
-    let mut records = Vec::<DataRecord>::new();
-    let mut offset = 0;
+    // So a dataset consisit of multiple "records"
+    // each records is a bunch of fields, so we need
+    // to apply the template on dataset multiple times if required.
+    let mut records = Vec::new();
+    while temp_buf.len() > 0 {
+        // generate a vector of tuples that represent field information to extract
+        let takes = template.field_specifiers.iter().map(|e| (e.ident, e.field_length)).collect::<Vec<(u16, u16)>>();
+        // start extracting fields returning a hashmap of field ident to its buffer extracted/sliced
+        match take_fields(&temp_buf, takes) {
+            Ok((rest, values)) => {
+                // update the current buffer and iterate if not empty (indication of more records)
+                temp_buf = rest;
 
-    while offset < data.len() {
-        let mut values = HashMap::new();
-        for field in &template.field_specifiers {
-            let bytes = &data[offset..offset + field.field_length as usize];
-            
-            if let Some(&(name, formatter)) = formatters.get(&field.ident) {
-                let drv = formatter(bytes);
-                values.insert(DataRecordKey::Str(name), drv);
-            } else {
-                values.insert(DataRecordKey::U16(field.ident), DataRecordValue::Bytes(bytes));
+                // push the record with enriched fields
+                records.push(DataRecord {
+                    // TODO : parsing fields doesn't respect PEN
+                    values: enrich_fields(&values, formatters)
+                });
+            },
+            Err(_err) => {
+                // ???
+                break;
             }
-
-            offset += field.field_length as usize;
-        }
-        records.push(DataRecord { values });
+        };
     }
 
-    Ok((data,
+    Ok((temp_buf,
         Set::DataSet(DataSet {
             header: set_header,
             records,
@@ -382,28 +442,35 @@ fn parse_options_set<'a>(data: &'a [u8],
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     // |              ...              |      Padding (optional)       |
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    let mut temp_buf = data;
 
-    let mut records = Vec::<DataRecord>::new();
-    let mut offset = 0;
+    // So a dataset consisit of multiple "records"
+    // each records is a bunch of fields, so we need
+    // to apply the template on dataset multiple times if required.
+    let mut records = Vec::new();
+    while temp_buf.len() > 0 {
+        // generate a vector of tuples that represent field information to extract
+        let takes = template.field_specifiers.iter().map(|e| (e.ident, e.field_length)).collect::<Vec<(u16, u16)>>();
+        // start extracting fields returning a hashmap of field ident to its buffer extracted/sliced
+        match take_fields(&temp_buf, takes) {
+            Ok((rest, values)) => {
+                // update the current buffer and iterate if not empty (indication of more records)
+                temp_buf = rest;
 
-    while offset < data.len() {
-        let mut values = HashMap::new();
-        for field in &template.field_specifiers {
-            let bytes = &data[offset..offset + field.field_length as usize];
-
-            if let Some(&(name, formatter)) = formatters.get(&field.ident) {
-                let drv = formatter(bytes);
-                values.insert(DataRecordKey::Str(name), drv);
-            } else {
-                values.insert(DataRecordKey::U16(field.ident), DataRecordValue::Bytes(bytes));
+                // push the record with enriched fields
+                records.push(DataRecord {
+                    // TODO : parsing fields doesn't respect PEN
+                    values: enrich_fields(&values, formatters)
+                });
+            },
+            Err(_err) => {
+                // ???
+                break;
             }
-
-            offset += field.field_length as usize;
-        }
-        records.push(DataRecord { values });
+        };
     }
 
-    Ok((data,
+    Ok((temp_buf,
         Set::DataSet(DataSet {
             header: set_header,
             records,
