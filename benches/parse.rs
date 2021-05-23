@@ -3,7 +3,7 @@ extern crate bencher;
 extern crate ipfix;
 
 use bencher::{Bencher, black_box};
-use ipfix::IpfixConsumer;
+use ipfix::IpfixParser;
 
 fn parse_data(bench: &mut Bencher) {
 
@@ -113,13 +113,13 @@ fn parse_data(bench: &mut Bencher) {
             0x00, 0x01, 0x58, 0x8D, 0x65, 0x0F, 0x78, 0x00, 0x00, 0x01, 0x58, 0x8D, 0x65, 0x0F,
             0x78];
 
-    let mut parser = IpfixConsumer::new();
+    let mut parser = IpfixParser::new();
 
     // parse the template so parsing data can be done
     assert!(parser.parse_message(&template_bytes).is_ok());
 
     bench.iter(|| {
-        let (_, _) = parser.parse_message(black_box(&data_bytes)).unwrap();
+        let _ = parser.parse_message(black_box(&data_bytes)).unwrap();
     })
 }
 
