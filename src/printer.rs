@@ -2,7 +2,7 @@ extern crate nom;
 
 use std::collections::HashMap;
 use nom::number::complete::{be_u128, be_u16, be_u32, be_u64};
-use crate::{DataRecord, DataRecordValue};
+use crate::{DataRecordValue};
 
 #[inline]
 pub fn be_int(s: &[u8]) -> DataRecordValue {
@@ -47,6 +47,11 @@ pub fn ipv6_addr(s: &[u8]) -> DataRecordValue {
 }
 
 #[inline]
+pub fn be_string(s: &[u8]) -> DataRecordValue {
+    DataRecordValue::String(String::from_utf8_lossy(s).to_string())
+}
+
+#[inline]
 named!(read_u16<u16>, call!(be_u16));
 #[inline]
 named!(read_u32<u32>, call!(be_u32));
@@ -85,13 +90,16 @@ fn mpls_stack(s: &[u8]) -> DataRecordValue {
     }
 }
 
-pub type ParserMapper = HashMap<u16, (&'static str, fn(&[u8]) -> DataRecordValue)>;
+// field_id -> parser
+pub type FieldFormatter = HashMap<u16, (&'static str, fn(&[u8]) -> DataRecordValue)>;
+// enterprise_number -> FieldFormatters
+pub type EnterpriseFormatter = HashMap<u32, FieldFormatter>;
 
 #[macro_export]
 macro_rules! field_parser(
     { $($key:expr => ($string:expr, $value:expr)),+ } => {
         {
-        let mut m = ParserMapper::new();
+        let mut m = FieldFormatter::new();
             $(
                 m.insert($key, ($string, $value));
             )+
@@ -100,7 +108,8 @@ macro_rules! field_parser(
     };
 );
 
-pub fn get_default_parsers() -> ParserMapper {
+// default field_parsers for enterprise number 0
+pub fn get_default_parsers() -> FieldFormatter {
     field_parser!{
         1 => ("octetDeltaCount", be_int),
         2 => ("packetDeltaCount", be_int),

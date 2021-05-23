@@ -15,7 +15,7 @@ use serde::Serialize;
 pub struct IpfixConsumer {
     pub templates: HashMap<u16, Template>,
     pub options_templates: HashMap<u16, OptionsTemplate>,
-    formatters: ParserMapper,
+    pen_formatter: EnterpriseFormatter,
 }
 
 #[allow(dead_code)]
@@ -123,7 +123,8 @@ pub struct DataRecord<'a> {
 #[serde(untagged)]
 pub enum DataRecordKey<'a> {
     Str(&'a str),
-    U16(u16)
+    Unrecognized(u16),
+    Err(String)
 }
 
 #[derive(PartialEq, Debug, Serialize)]
@@ -137,7 +138,8 @@ pub enum DataRecordValue<'a> {
     U64(u64),
     String(String),
     Bytes(&'a [u8]),
-    MPLS(u32, u8, u8)
+    MPLS(u32, u8, u8),
+    Empty,
 }
 
 impl<'a> DataRecord<'a> {
@@ -149,11 +151,20 @@ impl<'a> DataRecord<'a> {
 
 impl IpfixConsumer {
     pub fn new() -> IpfixConsumer {
+
+        let mut enterprise_formatters= HashMap::new();
+        enterprise_formatters.insert(0, get_default_parsers());
+        
         IpfixConsumer {
             templates: HashMap::new(),
             options_templates: HashMap::new(),
-            formatters: get_default_parsers()
+            pen_formatter: enterprise_formatters
         }
+    }
+
+    pub fn add_custom_field(&mut self, enterprise_number: u32, field_id: u16, name: &'static str, parser: fn (&[u8]) -> DataRecordValue) {
+        let m = self.pen_formatter.entry(enterprise_number).or_insert(HashMap::new());
+        m.insert(field_id, (name, parser));
     }
 
     #[inline]
@@ -194,10 +205,10 @@ impl IpfixConsumer {
                     _ => { // data set
                         if self.templates.contains_key(&set_header.set_id) {
                             let template = self.templates.get(&set_header.set_id).unwrap();
-                            Some(parse_data_set(set_bytes, set_header, template, &self.formatters))
+                            Some(parse_data_set(set_bytes, set_header, &template.field_specifiers, &self.pen_formatter))
                         } else if self.options_templates.contains_key(&set_header.set_id) {
                             let options_template = self.options_templates.get(&set_header.set_id).unwrap();
-                            Some(parse_options_set(set_bytes, set_header, options_template, &self.formatters))
+                            Some(parse_data_set(set_bytes, set_header, &options_template.field_specifiers, &self.pen_formatter))
                         } else {
                             None
                         }
@@ -327,63 +338,62 @@ fn take_field(input: &[u8], field_size: u16) -> nom::IResult<&[u8], &[u8]> {
     }
 }
 
-// based on `takes` which is a vector of tuples (field_id, field_size) do `take_field`
-fn take_fields(input: &[u8], takes: Vec<(u16, u16)>) -> nom::IResult<&[u8], HashMap::<u16, &[u8]>> {
+// based on `takes` which is a vector of tuples (field_id, field_size, enterprise_number) do `take_field`
+// returns a hashmap of <field_id, (field_buffer, enterprise_number)>
+fn take_fields(input: &[u8], takes: Vec<(u16, u16, u32)>) -> nom::IResult<&[u8], HashMap::<u16, (&[u8], u32)>> {
     
-    let mut values = HashMap::<u16, &[u8]>::new();
+    let mut values = HashMap::<u16, (&[u8], u32)>::new();
     let mut rest = input;
-    for (field_ident, field_size) in takes {
+    for (field_ident, field_size, enterprise_number) in takes {
         let (more, field_buf) = take_field(&rest, field_size)?;
         rest = more;
-        values.insert(field_ident, field_buf);
+        values.insert(field_ident, (field_buf, enterprise_number));
     }
 
     Ok((rest, values))
 }
 
-// Given DataRecord values apply value_parses on it.
-// TODO : we need to parse while respecting fields with PEN so we need to support
-// various ones so we can format correctly for various vendors.
-fn enrich_fields<'a>(values: &HashMap<u16, &'a [u8]>, value_parsers: &ParserMapper) -> HashMap<DataRecordKey<'a>, DataRecordValue<'a>> {
+// Given DataRecord values (field_id, (field_buffer, enterprise_number)) apply enterprise formatter on it
+// returning a datarecord key value map
+fn enrich_fields<'a>(values: &HashMap<u16, (&'a [u8], u32)>, enterprise_parsers: &EnterpriseFormatter) -> HashMap<DataRecordKey<'a>, DataRecordValue<'a>> {
     let hs = values.iter()
-    .map(|(val_id, val_bytes)| -> (DataRecordKey, DataRecordValue) {
-        match value_parsers.get(val_id) {
-            Some((field_name, field_parser)) => {
-                let parsed_val = field_parser(val_bytes);
-                (DataRecordKey::Str(field_name), parsed_val)
+    .map(|(field_id, (val_bytes, pen))| -> (DataRecordKey, DataRecordValue) {
+
+        
+        match enterprise_parsers.get(pen) {
+            Some(value_parsers) => {
+                match value_parsers.get(field_id) {
+                    Some((field_name, field_parser)) => {
+                        let parsed_val = field_parser(val_bytes);
+                        (DataRecordKey::Str(field_name), parsed_val)
+                    },
+                    None => {
+                        // recognized pen but unrecognized field parser
+                        (DataRecordKey::Unrecognized(*field_id), DataRecordValue::Bytes(*val_bytes))
+                    }
+                }
             },
             None => {
-                (DataRecordKey::U16(*val_id), DataRecordValue::Bytes(*val_bytes))
+                // unrecognized pen
+                (DataRecordKey::Err(format!("unsupported pen {} when trying to parse field {}", pen, field_id)), DataRecordValue::Empty)
             }
+
         }
+
     }).collect();
 
     hs
 }
 
-#[inline]
+
+// parse data set based on the field_specifiers provided
+// format them with enterprise formatter
 fn parse_data_set<'a>(data: &'a [u8],
                       set_header: SetHeader,
-                      template: &Template,
-                      formatters: &ParserMapper)
+                      field_specifiers: &Vec<FieldSpecifier>,
+                      formatters: &EnterpriseFormatter)
                       -> nom::IResult<&'a [u8], Set<'a>> {
-    //  0                   1                   2                   3
-    //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 1 - Field Value 1    |   Record 1 - Field Value 2    |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 1 - Field Value 3    |             ...               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 2 - Field Value 1    |   Record 2 - Field Value 2    |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 2 - Field Value 3    |             ...               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 3 - Field Value 1    |   Record 3 - Field Value 2    |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 3 - Field Value 3    |             ...               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |              ...              |      Padding (optional)       |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
     let mut temp_buf = data;
 
     // So a dataset consisit of multiple "records"
@@ -392,65 +402,7 @@ fn parse_data_set<'a>(data: &'a [u8],
     let mut records = Vec::new();
     while temp_buf.len() > 0 {
         // generate a vector of tuples that represent field information to extract
-        let takes = template.field_specifiers.iter().map(|e| (e.ident, e.field_length)).collect::<Vec<(u16, u16)>>();
-        // start extracting fields returning a hashmap of field ident to its buffer extracted/sliced
-        match take_fields(&temp_buf, takes) {
-            Ok((rest, values)) => {
-                // update the current buffer and iterate if not empty (indication of more records)
-                temp_buf = rest;
-
-                // push the record with enriched fields
-                records.push(DataRecord {
-                    // TODO : parsing fields doesn't respect PEN
-                    values: enrich_fields(&values, formatters)
-                });
-            },
-            Err(_err) => {
-                // ???
-                break;
-            }
-        };
-    }
-
-    Ok((temp_buf,
-        Set::DataSet(DataSet {
-            header: set_header,
-            records,
-        })))
-}
-
-#[inline]
-fn parse_options_set<'a>(data: &'a [u8],
-                         set_header: SetHeader,
-                         template: &OptionsTemplate,
-                         formatters: &ParserMapper)
-                         -> nom::IResult<&'a [u8], Set<'a>> {
-    //  0                   1                   2                   3
-    //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 1 - Field Value 1    |   Record 1 - Field Value 2    |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 1 - Field Value 3    |             ...               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 2 - Field Value 1    |   Record 2 - Field Value 2    |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 2 - Field Value 3    |             ...               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 3 - Field Value 1    |   Record 3 - Field Value 2    |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   Record 3 - Field Value 3    |             ...               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |              ...              |      Padding (optional)       |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    let mut temp_buf = data;
-
-    // So a dataset consisit of multiple "records"
-    // each records is a bunch of fields, so we need
-    // to apply the template on dataset multiple times if required.
-    let mut records = Vec::new();
-    while temp_buf.len() > 0 {
-        // generate a vector of tuples that represent field information to extract
-        let takes = template.field_specifiers.iter().map(|e| (e.ident, e.field_length)).collect::<Vec<(u16, u16)>>();
+        let takes = field_specifiers.iter().map(|e| (e.ident, e.field_length, e.enterprise_number.unwrap_or(0))).collect::<Vec<(u16, u16, u32)>>();
         // start extracting fields returning a hashmap of field ident to its buffer extracted/sliced
         match take_fields(&temp_buf, takes) {
             Ok((rest, values)) => {
