@@ -144,6 +144,7 @@ pub enum DataRecordValue<'a> {
     String(String),
     Bytes(&'a [u8]),
     MPLS(u32, u8, u8),
+    Err(String, &'a [u8]),
     Empty,
 }
 
@@ -225,7 +226,6 @@ impl<'a> DataSet<'a> {
             rest = more;
             values.insert(field_ident, (field_buf, enterprise_number));
         }
-
         Ok((rest, values))
     }
 
@@ -245,6 +245,10 @@ impl<'a> DataSet<'a> {
                 // start extracting fields returning a hashmap of field ident to its buffer extracted/sliced
                 match Self::take_fields(&temp_buf, takes) {
                     Ok((rest, values)) => {
+                        // nothing is consumed to avoid infini loop break
+                        if temp_buf == rest {
+                            break
+                        }
                         // update the current buffer and iterate if not empty (indication of more records)
                         temp_buf = rest;
                         // push the record with enriched fields
@@ -279,6 +283,10 @@ impl<'a> DataSet<'a> {
                 // start extracting fields returning a hashmap of field ident to its buffer extracted/sliced
                 match Self::take_fields(&temp_buf, takes) {
                     Ok((rest, values)) => {
+                        // nothing is consumed to avoid infini loop break
+                        if temp_buf == rest {
+                            break
+                        }
                         // update the current buffer and iterate if not empty (indication of more records)
                         temp_buf = rest;
                         // push the record with enriched fields

@@ -80,13 +80,13 @@ fn mpls_stack(s: &[u8]) -> DataRecordValue {
         )
     ));
 
-    //TODO: do some more conversions here
-    if let Ok((_, (label, exp, bottom))) = parse_mpls_stack(s) {
-        DataRecordValue::MPLS(label, exp, bottom)
-    } else {
-        println!("{:?}", parse_mpls_stack(s));
-        println!("MPLS STACK PARSING FAILED");
-        DataRecordValue::Bytes(s)
+    match parse_mpls_stack(s) {
+        Ok((_, (label, exp, bottom))) => {
+            DataRecordValue::MPLS(label, exp, bottom)
+        },
+        Err(err) => {
+            DataRecordValue::Err(format!("{}", err), s)
+        }
     }
 }
 
